@@ -14,11 +14,11 @@ OUTPUT_FILE = "vk_leads_final.txt"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Глобальный список городов (основные центры)
-CITIES = ["Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань", "Нижний Новгород", "Челябинск", "Самара", "Омск", "Ростов-на-Дону", "Уфа", "Красноярск", "Воронеж", "Пермь", "Волгоград", "Краснодар", "Саратов", "Тюмень", "Тольятти", "Ижевск", "Барнаул", "Ульяновск", "Иркутск", "Хабаровск", "Махачкала", "Владивосток", "Оренбург", "Севастополь", "Томск", "Кемерово", "Набережные Челны", "Липецк", "Тула", "Чебоксары", "Калининград", "Курск", "Ставрополь", "Улан-Удэ", "Тверь", "Магнитогорск", "Сочи", "Иваново", "Брянск", "Белгород", "Сургут", "Владимир", "Нижний Тагил", "Архангельск", "Череповец", "Калуга", "Смоленск", "Саранск", "Курган", "Подольск", "Вологда", "Орел", "Владикавказ", "Мурманск", "Тамбов", "Петрозаводск", "Кострома", "Йошкар-Ола", "Новороссийск", "Стерлитамак", "Сыктывкар", "Нижнекамск", "Благовещенск", "Великий Новгород", "Старый Оскол", "Псков", "Люберцы", "Балашиха", "Химки", "Мытищи", "Королев", "Алматы", "Астана", "Шымкент", "Караганда", "Актобе", "Тараз", "Павлодар", "Усть-Каменогорск", "Семей", "Минск", "Гомель", "Могилев", "Витебск", "Гродно", "Брест"]
+# Список городов для «коврового» парсинга
+CITIES = ["Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань", "Нижний Новгород", "Челябинск", "Самара", "Омск", "Ростов-на-Дону", "Уфа", "Красноярск", "Воронеж", "Пермь", "Волгоград", "Краснодар", "Саратов", "Тюмень", "Тольятти", "Ижевск", "Барнаул", "Ульяновск", "Иркутск", "Хабаровск", "Махачкала", "Владивосток", "Оренбург", "Томск", "Кемерово", "Набережные Челны", "Липецк", "Тула", "Чебоксары", "Калининград", "Ставрополь", "Тверь", "Магнитогорск", "Сочи", "Иваново", "Брянск", "Белгород", "Сургут", "Владимир", "Архангельск", "Калуга", "Смоленск", "Саранск", "Курган", "Подольск", "Вологда", "Орел", "Мурманск", "Тамбов", "Петрозаводск", "Кострома", "Алматы", "Астана", "Шымкент", "Минск", "Гомель"]
 
-# Ключевые слова
-PREFIXES = ["косметолог", "увеличение губ", "филлер", "ботокс", "инъекции"]
+# Запросы (точно как в твоем поиске)
+PREFIXES = ["косметолог", "врач косметолог", "увеличение губ", "филлер", "ботокс", "инъекции", "биоревитализация"]
 
 is_parsing = False
 all_leads = []
@@ -38,21 +38,19 @@ def extract_phone(text):
     match = re.search(r'(?:\+?7|8|375|998)[\s\-]?\(?\d{2,3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
     return clean_phone(match.group(0)) if match else None
 
-def vk_api_call(method, params):
+def vk_api(method, params):
     url = f"https://api.vk.com/method/{method}"
     params.update({"access_token": VK_TOKEN, "v": V})
     try:
         r = requests.get(url, params=params, timeout=15).json()
-        if 'error' in r:
-            if r['error']['error_code'] == 6: # Rate limit
-                time.sleep(2)
-                return vk_api_call(method, params)
-            return None
+        if 'error' in r and r['error']['error_code'] == 6:
+            time.sleep(2)
+            return vk_api(method, params)
         return r.get('response')
     except: return None
 
 def get_wall_phone(user_id):
-    res = vk_api_call("wall.get", {"owner_id": user_id, "count": 5})
+    res = vk_api("wall.get", {"owner_id": user_id, "count": 5})
     if res:
         full_text = " ".join([p.get('text', '') for p in res.get('items', [])])
         return extract_phone(full_text)
@@ -60,44 +58,45 @@ def get_wall_phone(user_id):
 
 def parser_worker(chat_id):
     global is_parsing, all_leads, seen_phones
-    
     print(f"\n🚀 СТАРТ! Городов в списке: {len(CITIES)}")
 
     for city in CITIES:
         if not is_parsing: break
-        print(f"🌍 ГОРОД: {city.upper()}")
+        print(f"\n🌍 ГОРОД: {city.upper()}")
         
         for q_prefix in PREFIXES:
             if not is_parsing: break
-            query = f"{q_prefix} {city}"
+            # ГЛАВНОЕ: Собираем запрос как в ручном поиске
+            search_query = f"{q_prefix} {city}"
             
-            # Поиск
-            res = vk_api_call("users.search", {"q": query, "count": 1000, "fields": "status,about,contacts"})
+            res = vk_api("users.search", {"q": search_query, "count": 1000, "fields": "status,about,contacts"})
             if not res: continue
             
             users = res.get('items', [])
-            print(f"   🔎 По запросу '{query}' найдено {len(users)} чел. Проверяю номера...")
+            print(f"   🔎 Ищу '{search_query}': нашел {len(users)} чел.")
             
             for u in users:
                 if not is_parsing: break
                 text = f"{u.get('status', '')} {u.get('about', '')}"
                 
-                # Ищем телефон тремя способами
+                # Если это не косметолог (ногти/волосы) - скипаем
+                if any(x in text.lower() for x in ["ногт", "кератин", "ресниц", "брови"]): continue
+
                 phone = clean_phone(u.get('mobile_phone')) or extract_phone(text)
                 if not phone:
-                    time.sleep(0.3)
+                    time.sleep(0.5)
                     phone = get_wall_phone(u['id'])
                 
                 if phone and phone not in seen_phones:
                     seen_phones.add(phone)
                     name = f"{u.get('first_name', '')} {u.get('last_name', '')}"
-                    all_leads.append((phone, name, text[:100]))
+                    all_leads.append((phone, name, text[:150]))
                     print(f"      ✅ НАЙДЕН: {phone} | {name}")
             
-            time.sleep(1)
+            time.sleep(1.5)
 
     is_parsing = False
-    bot.send_message(chat_id, f"✅ Сбор завершен! Собрано: {len(all_leads)} номеров.")
+    bot.send_message(chat_id, f"✅ Готово! Итог: {len(all_leads)} номеров.")
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
@@ -116,7 +115,7 @@ def handle_text(message):
         is_parsing = True
         all_leads.clear()
         seen_phones.clear()
-        bot.send_message(message.chat.id, "🚀 Запускаю сбор. Следи за консолью!")
+        bot.send_message(message.chat.id, "🚀 Сбор запущен. Смотри логи в консоли!")
         threading.Thread(target=parser_worker, args=(message.chat.id,)).start()
     elif message.text == "🛑 Стоп":
         is_parsing = False

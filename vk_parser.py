@@ -15,17 +15,37 @@ OUTPUT_FILE = "vk_leads_vertical.txt"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Ключи для снайперского охвата
-PREFIXES = ["косметолог", "врач косметолог", "увеличение губ", "филлер", "ботокс", "инъекции", "биоревитализация"]
+# Ключи для поиска активных объявлений
+NEWS_QUERIES = [
+    "запись на губы", "косметолог инъекции", "филлер москва", "ботокс акция", 
+    "увеличение губ самара", "биоревитализация спб", "контурная пластика",
+    "мезотерапия лица", "препараты для косметологов", "нужны модели губы"
+]
 
-# Список живых городов СНГ
-CITIES = ["Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань", "Нижний Новгород", "Челябинск", "Самара", "Омск", "Ростов-на-Дону", "Уфа", "Красноярск", "Воронеж", "Пермь", "Волгоград", "Краснодар", "Саратов", "Тюмень", "Тольятти", "Ижевск", "Барнаул", "Ульяновск", "Иркутск", "Хабаровск", "Махачкала", "Владивосток", "Оренбург", "Томск", "Кемерово", "Набережные Челны", "Липецк", "Тула", "Чебоксары", "Калининград", "Ставрополь", "Тверь", "Магнитогорск", "Сочи", "Иваново", "Брянск", "Белгород", "Сургут", "Владимир", "Архангельск", "Калуга", "Смоленск", "Саранск", "Курган", "Подольск", "Вологда", "Орел", "Мурманск", "Тамбов", "Петрозаводск", "Кострома", "Алматы", "Астана", "Шымкент", "Минск", "Гомель"]
+# ================= ЖЕСТКИЕ ФИЛЬТРЫ (ТВОИ ТРЕБОВАНИЯ) =================
+TRASH_WORDS = ["кератин", "ресниц", "брови", "маникюр", "ногти", "шугаринг", "депиляц", "тату", "парикмахер", "визаж", "макияж", "окрашивание", "стриж"]
+INJECTION_MARKERS = ["инъекц", "филлер", "ботокс", "губ", "контурн", "мезо", "биоревитализац", "врач", "мед", "шприц", "нитей", "нити", "липолитик", "колю", "скулы", "токсин", "уколы"]
+
+def is_strict_target(text):
+    if not text: return False
+    text = text.lower()
+    
+    # 1. Если есть ногти/волосы - сразу в бан
+    if any(bad in text for bad in TRASH_WORDS):
+        return False
+    
+    # 2. Обязательно наличие инъекционных слов
+    if any(good in text for good in INJECTION_MARKERS):
+        return True
+        
+    return False
+
+# =====================================================================
 
 is_parsing = False
 all_leads = []
 seen_phones = set()
-
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+seen_users = set()
 
 def clean_phone(phone_str):
     if not phone_str: return None
@@ -41,117 +61,83 @@ def extract_phone(text):
     match = re.search(r'(?:\+?7|8|375|998)[\s\-]?\(?\d{2,3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
     return clean_phone(match.group(0)) if match else None
 
-def vk_api_call(method, params, retry=0):
+def vk_api(method, params, retry=0):
     url = f"https://api.vk.com/method/{method}"
-    params = dict(params)
     params.update({"access_token": VK_TOKEN, "v": V})
     try:
-        r = requests.get(url, params=params, timeout=15).json()
-    except Exception as e:
-        print(f"❌ ОШИБКА СЕТИ: {e}")
-        if retry < 3:
-            time.sleep(5)
-            return vk_api_call(method, params, retry + 1)
-        return None
+        r = requests.get(url, params=params, timeout=20).json()
+        if 'error' in r:
+            code = r['error']['error_code']
+            if code == 9: 
+                time.sleep(300) # Бан за скорость - спим 5 мин
+                return vk_api(method, params, retry + 1)
+            if code == 6: 
+                time.sleep(3)
+                return vk_api(method, params, retry + 1)
+            return None
+        return r.get('response')
+    except: return None
 
-    if 'error' in r:
-        code = r['error'].get('error_code')
-        msg = r['error'].get('error_msg', '')
-        
-        if code == 9: # FLOOD CONTROL - жесткий стоп
-            wait_time = (retry + 1) * 60 # Ждем минуту и больше
-            print(f"⚠️ FLOOD CONTROL! ВК в ярости. Сплю {wait_time} сек...")
-            time.sleep(wait_time)
-            return vk_api_call(method, params, retry + 1)
-        
-        if code == 6: # Too many requests per sec
-            time.sleep(2)
-            return vk_api_call(method, params, retry + 1)
-            
-        print(f"❌ ОШИБКА VK {code}: {msg}")
-        return None
-    return r.get('response')
-
-def get_wall_phone(user_id):
-    res = vk_api_call("wall.get", {"owner_id": user_id, "count": 5})
-    if res and 'items' in res:
-        full_text = " ".join([p.get('text', '') for p in res['items']])
-        return extract_phone(full_text)
-    return None
-
-# ================= ОСНОВНОЙ ПАРСЕР =================
+def get_user_data(user_id):
+    res = vk_api("users.get", {"user_ids": user_id, "fields": "status,about,contacts"})
+    if res:
+        u = res[0]
+        full_info = f"{u.get('status', '')} {u.get('about', '')}"
+        phone = clean_phone(u.get('mobile_phone')) or extract_phone(full_info)
+        return phone, f"{u.get('first_name')} {u.get('last_name')}", full_info
+    return None, None, None
 
 def parser_worker(chat_id):
-    global is_parsing, all_leads, seen_phones
-
-    print(f"\n🚀 ТИХИЙ ПАРСЕР ЗАПУЩЕН! Городов: {len(CITIES)}")
+    global is_parsing, all_leads, seen_phones, seen_users
     
-    for city in CITIES:
+    print(f"\n🚀 СНАЙПЕРСКИЙ ПАРСИНГ НОВОСТЕЙ ЗАПУЩЕН...")
+
+    for query in NEWS_QUERIES:
         if not is_parsing: break
-        print(f"\n🌍 ГОРОД: {city.upper()}")
+        print(f"\n🔎 ИЩУ ПОСТЫ: {query.upper()}")
         
-        for q_prefix in PREFIXES:
+        res = vk_api("newsfeed.search", {"q": query, "count": 200})
+        if not res or 'items' not in res: continue
+
+        posts = res['items']
+        for post in posts:
             if not is_parsing: break
             
-            # Основной запрос как в ручном поиске
-            query = f"{q_prefix} {city}"
-            print(f"   🔎 Ищу: '{query}'")
+            author_id = post.get('owner_id')
+            if not author_id or author_id < 0 or author_id in seen_users:
+                continue
             
-            offset = 0
-            max_offset = 200 # Листаем 2 страницы, чтобы не бесить ВК
+            post_text = post.get('text', '')
+            
+            # СТРОЖАЙШАЯ ПРОВЕРКА ТЕКСТА ПОСТА
+            if not is_strict_target(post_text):
+                continue
 
-            while offset <= max_offset and is_parsing:
-                params = {
-                    "q": query,
-                    "count": 100,
-                    "offset": offset,
-                    "fields": "status,about,contacts,city"
-                }
-                res = vk_api_call("users.search", params)
-                if not res or 'items' not in res: break
+            seen_users.add(author_id)
+            phone = extract_phone(post_text)
+            
+            if not phone:
+                time.sleep(1.2)
+                phone, name, about = get_user_data(author_id)
+                # Проверяем профиль, если в посте было мало инфы
+                if not is_strict_target(about) and not phone:
+                    continue
+            else:
+                _, name, _ = get_user_data(author_id)
 
-                users = res['items']
-                print(f"      Получено {len(users)} чел (offset {offset})")
-
-                if not users: break
-
-                for u in users:
-                    if not is_parsing: break
-                    uid = u.get('id')
-                    
-                    # Мягкий фильтр (только мусор)
-                    status = u.get('status', '') or ""
-                    about = u.get('about', '') or ""
-                    combined = f"{status} {about}".lower()
-                    
-                    if any(x in combined for x in ["ногт", "кератин", "ресниц", "брови"]): 
-                        continue
-
-                    # Поиск телефона
-                    phone = clean_phone(u.get('mobile_phone')) or extract_phone(combined)
-                    
-                    if not phone:
-                        time.sleep(0.5) # Пауза перед стеной
-                        phone = get_wall_phone(uid)
-
-                    if phone and phone not in seen_phones:
-                        seen_phones.add(phone)
-                        name = f"{u.get('first_name','')} {u.get('last_name','')}"
-                        all_leads.append((phone, name, combined[:100], city))
-                        print(f"      ✅ НАЙДЕН: {phone} | {name}")
-                        
-                        if len(all_leads) % 10 == 0:
-                            bot.send_message(chat_id, f"📊 Собрано: {len(all_leads)} (сейчас: {city})")
-
-                offset += 100
-                time.sleep(2 + random.random()) # Пауза между страницами
-
-            time.sleep(3 + random.random() * 2) # Пауза между фразами
+            if phone and phone not in seen_phones:
+                seen_phones.add(phone)
+                name = name or "Инъекционист"
+                all_leads.append((phone, name, post_text[:100], "Живой пост"))
+                print(f"      🎯 ЦЕЛЬ ЗАХВАЧЕНА: {phone} | {name}")
+                
+                if len(all_leads) % 10 == 0:
+                    bot.send_message(chat_id, f"🎯 В базе {len(all_leads)} чистых инъекционистов!")
+            
+            time.sleep(random.uniform(2, 4))
 
     is_parsing = False
-    bot.send_message(chat_id, f"✅ Сбор завершен! Итого: {len(all_leads)} номеров.")
-
-# ================= ИНТЕРФЕЙС =================
+    bot.send_message(chat_id, f"✅ Сбор завершен! Итог: {len(all_leads)} идеальных лидов.")
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
@@ -159,7 +145,7 @@ def start_cmd(message):
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.row("▶️ Старт", "🛑 Стоп")
         markup.row("📊 Статистика", "💾 Выгрузить базу")
-        bot.send_message(message.chat.id, "Бот готов к тихой охоте.", reply_markup=markup)
+        bot.send_message(message.chat.id, "Снайпер на позиции. Мусор не пройдет.", reply_markup=markup)
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
@@ -170,17 +156,18 @@ def handle_text(message):
         is_parsing = True
         all_leads.clear()
         seen_phones.clear()
-        bot.send_message(message.chat.id, "🚀 Поехали! ВК больше не будет ругаться.")
+        seen_users.clear()
+        bot.send_message(message.chat.id, "🚀 Начинаю зачистку новостей по твоим фильтрам!")
         threading.Thread(target=parser_worker, args=(message.chat.id,)).start()
     elif message.text == "🛑 Стоп":
         is_parsing = False
     elif message.text == "📊 Статистика":
-        bot.send_message(message.chat.id, f"📊 Собрано уникальных: {len(all_leads)}")
+        bot.send_message(message.chat.id, f"📊 Отфильтровано инъекционистов: {len(all_leads)}")
     elif message.text == "💾 Выгрузить базу":
-        if not all_leads: return bot.send_message(message.chat.id, "Пусто!")
+        if not all_leads: return
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             for p, n, d, c in all_leads:
-                f.write(f"{p} | {n} | {c} | {d}\n")
+                f.write(f"{p} | {n} | {d}\n")
         with open(OUTPUT_FILE, "rb") as f:
             bot.send_document(message.chat.id, f)
 

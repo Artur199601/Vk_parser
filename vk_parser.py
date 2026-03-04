@@ -10,8 +10,8 @@ VK_TOKEN = "vk1.a.Noi0OXzVhiNrXq87353MV-GVozMBSR038ye9gRvOt8KMHohEqEB7QpotrwZHwu
 V = "5.131"
 
 BOT_TOKEN = "8667236920:AAGnd47krwDRRAAIY9APdR3FnHl00saR21g"
-ADMIN_ID = 1568924415 # Твой ID
-OUTPUT_FILE = "vk_leads_clean.txt"
+ADMIN_ID = 1568924415
+OUTPUT_FILE = "vk_leads_vertical.txt"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -19,10 +19,16 @@ PREFIXES = ["косметолог", "kosmetolog", "cosmetolog", "cosmetologist",
 CITIES = ["Москва", "Moscow", "Moskva", "Мск", "Санкт-Петербург", "Spb", "Спб", "Новосибирск", "Екатеринбург", "Казань", "Краснодар", "Нижний Новгород", "Челябинск", "Самара", "Ростов-на-Дону", "Уфа", "Омск", "Красноярск", "Воронеж", "Пермь", "Волгоград", "Сочи", "Тюмень", "Саратов", "Тольятти", "Ижевск", "Барнаул", "Ульяновск", "Иркутск", "Хабаровск", "Махачкала", "Владивосток", "Минск", "Гомель", "Алматы", "Астана", "Ташкент"]
 BAD_WORDS = ["кератин", "волос", "ресниц", "брови", "маникюр", "ногти", "электрик", "авто", "потолк", "одежда", "шугаринг", "депиляц", "массаж", "тату", "фото", "визаж", "стилист", "парикмахер", "макияж", "аренда"]
 
-# Глобальные переменные для управления ботом
+# Глобальные переменные 
 is_parsing = False
 all_leads = []
+seen_phones = set() # Жесткая защита от дублей
 last_pulse_count = 0
+
+current_city = "Ожидание..."
+current_query = "Ожидание..."
+processed_cities = 0
+total_cities = len(CITIES)
 
 # ============================================
 
@@ -32,6 +38,21 @@ def is_target_audience(text):
     for bad in BAD_WORDS:
         if bad in text: return False 
     return True
+
+def clean_human_name(raw_name):
+    # Вырезаем смайлики и мусор, оставляем только буквы и пробелы
+    name = re.sub(r'[^a-zA-Zа-яА-ЯёЁ\s\-]', ' ', raw_name)
+    # Слова-паразиты, которые надо вырезать из имени
+    stop_words = ['косметолог', 'врач', 'доктор', 'москва', 'мск', 'спб', 'питер', 'ростов', 'сочи', 'казань', 'краснодар', 'салон', 'клиника', 'студия', 'кабинет', 'эстетист', 'дерматолог', 'медицинский', 'dr', 'doctor']
+    
+    words = name.split()
+    clean_words = []
+    for w in words:
+        if w.lower() not in stop_words and len(w) > 1:
+            clean_words.append(w)
+            
+    final_name = " ".join(clean_words).strip()
+    return final_name.title() if final_name else "Косметолог" # Если имя стерлось, ставим дефолт
 
 def clean_phone(phone_str):
     digits = re.sub(r'\D', '', phone_str)
@@ -57,17 +78,24 @@ def check_wall_for_phone(user_id):
     except Exception: return None
 
 def parser_worker(chat_id):
-    global is_parsing, all_leads, last_pulse_count
+    global is_parsing, all_leads, seen_phones, last_pulse_count, current_city, current_query, processed_cities
+    
+    print("\n🚀 [СЕРВЕР] БУРОВАЯ УСТАНОВКА ЗАПУЩЕНА!\n")
     
     for city in CITIES:
         if not is_parsing: break
         
+        current_city = city
+        processed_cities += 1
+        print(f"🌍 Переходим к городу: {city} ({processed_cities}/{total_cities})")
+        
         for prefix in PREFIXES:
             if not is_parsing: break
             
-            query = f"{prefix} {city}"
+            current_query = f"{prefix} {city}"
+            
             url = "https://api.vk.com/method/users.search"
-            params = {"q": query, "count": 1000, "fields": "status,about,contacts,screen_name", "access_token": VK_TOKEN, "v": V}
+            params = {"q": current_query, "count": 1000, "fields": "status,about,contacts,screen_name", "access_token": VK_TOKEN, "v": V}
             
             try:
                 response = requests.get(url, params=params, timeout=10).json()
@@ -79,11 +107,11 @@ def parser_worker(chat_id):
                     full_text = f"{user.get('first_name', '')} {user.get('last_name', '')} {user.get('status', '')} {user.get('about', '')}"
                     if not is_target_audience(full_text): continue 
                         
-                    name = f"{user.get('first_name', '')} {user.get('last_name', '')}"
+                    raw_name = f"{user.get('first_name', '')} {user.get('last_name', '')}"
+                    clean_name = clean_human_name(raw_name) # ОЧИЩАЕМ ИМЯ!
                     
-                    # Описание для проверки глазками
                     desc = f"{user.get('status', '')} {user.get('about', '')}".replace('\n', ' ').strip()
-                    if len(desc) > 100: desc = desc[:100] + "..."
+                    if len(desc) > 150: desc = desc[:150] + "..."
                     if not desc: desc = "Нет описания"
                     
                     phone = clean_phone(user.get('mobile_phone', '')) if user.get('mobile_phone') else None
@@ -93,28 +121,30 @@ def parser_worker(chat_id):
                         phone = check_wall_for_phone(user['id'])
                     
                     if phone:
-                        if not any(phone == lead[0] for lead in all_leads):
-                            # Сохраняем ТОЛЬКО Номер, Имя и Описание
-                            all_leads.append((phone, name, desc))
+                        # АБСОЛЮТНАЯ ЗАЩИТА ОТ ДУБЛЕЙ
+                        if phone not in seen_phones:
+                            seen_phones.add(phone)
+                            all_leads.append((phone, clean_name, desc))
+                            print(f"      [+] ЧИСТЫЙ ЛИД: {phone} | {clean_name}")
                             
-                            # Отправка ПУЛЬСА каждые 50 номеров
                             if len(all_leads) - last_pulse_count >= 50:
                                 last_pulse_count = len(all_leads)
-                                bot.send_message(chat_id, f"💓 ПУЛЬС: Собрано {len(all_leads)} чистых номеров. Работаю дальше...")
+                                bot.send_message(chat_id, f"💓 ПУЛЬС: Собрано {len(all_leads)} уник. номеров. Сейчас копаю: {current_city}...")
                 
-            except Exception: pass
+            except Exception as e: 
+                pass
             time.sleep(0.5)
             
     if is_parsing:
         is_parsing = False
-        bot.send_message(chat_id, f"✅ Сбор полностью завершен! Всего найдено: {len(all_leads)} номеров. Жми 'Выгрузить базу'.")
+        bot.send_message(chat_id, f"✅ Сбор полностью завершен! Всего уникальных: {len(all_leads)}. Жми 'Выгрузить базу'.")
 
 # ================= ИНТЕРФЕЙС БОТА =================
 
 def get_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("▶️ Старт"), types.KeyboardButton("🛑 Стоп"))
-    markup.add(types.KeyboardButton("💾 Выгрузить базу"))
+    markup.row(types.KeyboardButton("▶️ Старт"), types.KeyboardButton("🛑 Стоп"))
+    markup.row(types.KeyboardButton("📊 Статистика"), types.KeyboardButton("💾 Выгрузить базу"))
     return markup
 
 @bot.message_handler(commands=['start'])
@@ -125,7 +155,7 @@ def start_cmd(message):
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     if message.from_user.id != ADMIN_ID: return
-    global is_parsing, all_leads, last_pulse_count
+    global is_parsing, all_leads, seen_phones, last_pulse_count, processed_cities, current_city, current_query
     
     if message.text == "▶️ Старт":
         if is_parsing:
@@ -133,7 +163,9 @@ def handle_text(message):
             return
         is_parsing = True
         all_leads = []
+        seen_phones.clear() # Сбрасываем дубли при новом старте
         last_pulse_count = 0
+        processed_cities = 0
         bot.send_message(message.chat.id, "🚀 Погнали! Запустил сбор базы. Пришлю пульс через 50 номеров.")
         threading.Thread(target=parser_worker, args=(message.chat.id,)).start()
         
@@ -144,20 +176,33 @@ def handle_text(message):
         is_parsing = False
         bot.send_message(message.chat.id, f"🛑 Остановка... Собрано: {len(all_leads)} номеров. Можешь выгружать.")
         
+    elif message.text == "📊 Статистика":
+        status = "🟢 В работе" if is_parsing else "🔴 Остановлен"
+        text = (
+            f"📊 **Live-Статистика:**\n\n"
+            f"Статус: {status}\n"
+            f"Уникальных номеров: **{len(all_leads)}**\n"
+            f"Текущий город: {current_city} ({processed_cities}/{total_cities})\n"
+        )
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+        
     elif message.text == "💾 Выгрузить базу":
         if len(all_leads) == 0:
             bot.send_message(message.chat.id, "База пуста! Сначала запусти парсер.")
             return
             
-        bot.send_message(message.chat.id, "Формирую файл...")
+        bot.send_message(message.chat.id, "Формирую файл (формат 'В столбик')...")
+        
+        # ЗАПИСЬ КРАСИВО В СТОЛБИК
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
             for phone, name, desc in all_leads:
-                # Записываем в файл только то, что просил: Номер | Имя | Описание
-                f.write(f"{phone} | {name} | {desc}\n")
+                f.write(f"Номер: {phone}\n")
+                f.write(f"Имя: {name}\n")
+                f.write(f"Описание: {desc}\n")
+                f.write("-" * 40 + "\n")
                 
         with open(OUTPUT_FILE, "rb") as f:
             bot.send_document(message.chat.id, f)
 
 if __name__ == "__main__":
-    print("Бот запущен. Напиши ему /start в Телеграме.")
     bot.polling(none_stop=True)

@@ -14,7 +14,7 @@ OUTPUT_FILE = "vk_leads_vertical.txt"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# МАТРИЦА ЗАПРОСОВ (15 ключей для максимального охвата инъекционистов)
+# МАТРИЦА ЗАПРОСОВ (15 ключей для охвата инъекционистов)
 PREFIXES = [
     "косметолог", "врач косметолог", "увеличение губ", "контурная пластика", 
     "ботулинотерапия", "филлер", "инъекции", "биоревитализация", 
@@ -41,6 +41,7 @@ def is_target_audience(text):
         if bad in text: return False
     has_aesthetic = any(a in text for a in AESTHETIC_WORDS)
     has_injection = any(i in text for i in INJECTION_WORDS)
+    # Если есть лазер/эстетика, но нет уколов - в мусор
     if has_aesthetic and not has_injection: return False
     return True
 # ========================================================
@@ -54,20 +55,23 @@ processed_cities = 0
 total_cities = 0
 
 def load_cities_from_vk():
+    """Скачивает ТОЛЬКО реальные города, отсекая тех. мусор типа '0 км'"""
     cities = {}
-    # МАСШТАБ: РФ(600), РБ(200), КЗ(200)
-    targets = {1: 600, 3: 200, 4: 200} 
-    print("\n🌍 [СЕРВЕР] Начинаю загрузку глобальной базы городов СНГ...")
+    targets = {1: 450, 3: 100, 4: 100} # РФ, РБ, КЗ
+    print("\n🌍 [СЕРВЕР] Фильтрация глобальной базы городов...")
     
     for country_id, count in targets.items():
         url = "https://api.vk.com/method/database.getCities"
-        params = {"country_id": country_id, "count": count, "need_all": 1, "access_token": VK_TOKEN, "v": V}
+        # need_all: 0 забирает только основные населенные пункты (без трасс и поселков)
+        params = {"country_id": country_id, "count": count, "need_all": 0, "access_token": VK_TOKEN, "v": V}
         try:
             resp = requests.get(url, params=params, timeout=10).json()
             items = resp.get('response', {}).get('items', [])
             for item in items:
-                cities[item['title']] = item['id']
-            print(f"   - Страна {country_id}: Загружено {len(items)} городов.")
+                title = item['title']
+                # Жесткий фильтр: нет цифр в названии и нет слова "км"
+                if not any(char.isdigit() for char in title) and "км" not in title.lower():
+                    cities[title] = item['id']
         except: pass
         time.sleep(1)
     return cities
@@ -100,7 +104,7 @@ def vk_request(url, params):
             resp = requests.get(url, params=params, timeout=10).json()
             if 'error' in resp:
                 if resp['error'].get('error_code') == 6:
-                    time.sleep(2) # Увеличили паузу при ошибке скорости
+                    time.sleep(2)
                     continue
                 else: return None
             return resp
@@ -129,16 +133,12 @@ def parser_worker(chat_id):
         current_city = city_name
         processed_cities += 1
         
-        print(f"🌍 [{processed_cities}/{total_cities}] ГОРОД: {city_name.upper()}")
+        print(f"🌍 [{processed_cities}/{total_cities}] РАБОТАЮ: {city_name.upper()}")
         
         for prefix in PREFIXES:
             if not is_parsing: break
-            
-            # Сортировка по популярности (0) и дате регистрации (1)
             for sort_type in [0, 1]:
                 if not is_parsing: break
-                
-                print(f"   🔎 Запрос: '{prefix}' | Сорт: {sort_type}")
                 
                 url = "https://api.vk.com/method/users.search"
                 params = {
@@ -152,7 +152,6 @@ def parser_worker(chat_id):
                 
                 users = response.get('response', {}).get('items', [])
                 found_in_round = 0
-                
                 for user in users:
                     if not is_parsing: break
                     full_text = f"{user.get('first_name', '')} {user.get('last_name', '')} {user.get('status', '')} {user.get('about', '')}"
@@ -161,7 +160,7 @@ def parser_worker(chat_id):
                     phone = clean_phone(user.get('mobile_phone', '')) if user.get('mobile_phone') else None
                     if not phone: phone = extract_phone_from_text(full_text)
                     if not phone:
-                        time.sleep(0.7) # Пауза перед чеком стены
+                        time.sleep(0.8) # Пауза перед стеной
                         phone = check_wall_for_phone(user['id'])
                     
                     if phone and phone not in seen_phones:
@@ -178,12 +177,13 @@ def parser_worker(chat_id):
                                 for p, n, d in all_leads:
                                     f.write(f"Номер: {p}\nИмя: {n}\nОписание: {d}\n" + "-"*40 + "\n")
                 
-                print(f"      [+] Найдено новых: {found_in_round}")
-                time.sleep(1.2) # Глобальная пауза между запросами
+                if found_in_round > 0:
+                    print(f"      [+] Найдено новых: {found_in_round}")
+                time.sleep(1.3)
 
     if is_parsing:
         is_parsing = False
-        bot.send_message(chat_id, f"✅ Глобальный сбор завершен! Итоговая база: {len(all_leads)}.")
+        bot.send_message(chat_id, f"✅ Сбор завершен! Итоговая база: {len(all_leads)}.")
 
 # ================= ИНТЕРФЕЙС БОТА =================
 def get_keyboard():
@@ -195,7 +195,7 @@ def get_keyboard():
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     if message.from_user.id != ADMIN_ID: return
-    bot.send_message(message.chat.id, "Привет, Босс. Система ГЛОБАЛЬНОГО масштабирования готова.", reply_markup=get_keyboard())
+    bot.send_message(message.chat.id, "Привет, Босс. Глубокое бурение городов готово.", reply_markup=get_keyboard())
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
@@ -207,7 +207,7 @@ def handle_text(message):
         is_parsing = True
         all_leads, seen_phones = [], set()
         last_pulse_count, processed_cities = 0, 0
-        bot.send_message(message.chat.id, "🚀 Глобальный запуск на 1000 городов СНГ!")
+        bot.send_message(message.chat.id, "🚀 Погнали! Запущено бурение реальных городов СНГ.")
         threading.Thread(target=parser_worker, args=(message.chat.id,)).start()
         
     elif message.text == "🛑 Стоп":
@@ -225,5 +225,5 @@ def handle_text(message):
         except: bot.send_message(message.chat.id, "База пуста!")
 
 if __name__ == "__main__":
-    print("🤖 [СЕРВЕР] Бот-комбайн запущен. Жми 'Старт' в Телеграме.")
+    print("🤖 [СЕРВЕР] Бот запущен. Жми 'Старт' в Телеграме.")
     bot.polling(none_stop=True)

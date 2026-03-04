@@ -5,47 +5,80 @@ import time
 import re
 import threading
 import random
+import os
 
 # ================= КОНФИГИ =================
-VK_TOKEN = "vk1.a.Noi0OXzVhiNrXq87353MV-GVozMBSR038ye9gRvOt8KMHohEqEB7QpotrwZHwu29TG53wyomh_cQsN5kHepRPzYiDiDGFImdTar-s0W7fbnT_AYawM5XVh72vZHGN1zIwn6Nq7GgN3jfcJ2_iNwJsksqR1QvVX9EdXKkWB2U45-jGjqWoe94jtOPeECeFKy_uAL3ORKTyqAKAMslE6ll1A"
+# ВСТАВЬ СЮДА 3-5 ТОКЕНОВ ДЛЯ СКОРОСТИ (Через запятую)
+VK_TOKENS = [
+    "vk1.a.Noi0OXzVhiNrXq87353MV-GVozMBSR038ye9gRvOt8KMHohEqEB7QpotrwZHwu29TG53wyomh_cQsN5kHepRPzYiDiDGFImdTar-s0W7fbnT_AYawM5XVh72vZHGN1zIwn6Nq7GgN3jfcJ2_iNwJsksqR1QvVX9EdXKkWB2U45-jGjqWoe94jtOPeECeFKy_uAL3ORKTyqAKAMslE6ll1A",
+    # "ВТОРОЙ_ТОКЕН_ТУТ",
+    # "ТРЕТИЙ_ТОКЕН_ТУТ"
+]
+
 V = "5.131"
 BOT_TOKEN = "8667236920:AAGnd47krwDRRAAIY9APdR3FnHl00saR21g"
 ADMIN_ID = 1568924415
-OUTPUT_FILE = "vk_leads_vertical.txt"
+OUTPUT_FILE = "vk_leads_final.txt"
+GLOBAL_DB = "all_seen_phones.txt"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Ключи для поиска активных объявлений
-NEWS_QUERIES = [
-    "запись на губы", "косметолог инъекции", "филлер москва", "ботокс акция", 
-    "увеличение губ самара", "биоревитализация спб", "контурная пластика",
-    "мезотерапия лица", "препараты для косметологов", "нужны модели губы"
-]
+# Ключевые слова и Список Городов (расширенный для охвата)
+KEYWORDS = ["косметолог", "увеличение губ", "инъекции", "ботокс", "филлер", "биоревитализация", "контурная пластика"]
+CITIES = ["Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань", "Нижний Новгород", "Челябинск", "Самара", "Омск", "Ростов-на-Дону", "Уфа", "Красноярск", "Воронеж", "Пермь", "Волгоград", "Краснодар", "Саратов", "Тюмень", "Тольятти", "Ижевск", "Барнаул", "Иркутск", "Хабаровск", "Махачкала", "Владивосток", "Минск", "Алматы", "Астана"]
 
-# ================= ЖЕСТКИЕ ФИЛЬТРЫ (ТВОИ ТРЕБОВАНИЯ) =================
-TRASH_WORDS = ["кератин", "ресниц", "брови", "маникюр", "ногти", "шугаринг", "депиляц", "тату", "парикмахер", "визаж", "макияж", "окрашивание", "стриж"]
-INJECTION_MARKERS = ["инъекц", "филлер", "ботокс", "губ", "контурн", "мезо", "биоревитализац", "врач", "мед", "шприц", "нитей", "нити", "липолитик", "колю", "скулы", "токсин", "уколы"]
+# ================= ФИЛЬТРЫ =================
+TRASH_WORDS = ["кератин", "ресниц", "брови", "маникюр", "ногти", "шугаринг", "депиляц", "тату", "парикмахер", "визаж", "макияж", "окрашивание", "стриж", "логопед", "нутрициолог", "психолог", "гимнастика", "самомассаж"]
+KILLER_PHRASES = ["без инъекций", "без уколов", "нет уколам", "против инъекций", "без иглы", "безинъекционная"]
+INJECTION_MARKERS = ["губ", "инъекц", "филлер", "ботокс", "укол", "мезо", "биореви", "нити", "пластик", "шприц"]
 
 def is_strict_target(text):
     if not text: return False
     text = text.lower()
-    
-    # 1. Если есть ногти/волосы - сразу в бан
-    if any(bad in text for bad in TRASH_WORDS):
-        return False
-    
-    # 2. Обязательно наличие инъекционных слов
-    if any(good in text for good in INJECTION_MARKERS):
-        return True
-        
-    return False
+    if any(killer in text for killer in KILLER_PHRASES): return False
+    if any(bad in text for bad in TRASH_WORDS): return False
+    return any(good in text for good in INJECTION_MARKERS)
 
-# =====================================================================
+# ================= СИСТЕМА ТОКЕНОВ =================
+token_status = {token: True for token in VK_TOKENS}
 
+def get_active_token():
+    active = [t for t, status in token_status.items() if status]
+    if not active:
+        print("🛑 ВСЕ ТОКЕНЫ В БАНЕ. Сплю 10 минут...")
+        time.sleep(600)
+        for t in token_status: token_status[t] = True
+        return get_active_token()
+    return random.choice(active)
+
+def vk_api(method, params, token=None):
+    if not token: token = get_active_token()
+    url = f"https://api.vk.com/method/{method}"
+    params.update({"access_token": token, "v": V})
+    try:
+        r = requests.get(url, params=params, timeout=15).json()
+        if 'error' in r:
+            code = r['error']['error_code']
+            if code in [6, 9]: # Flood / Too fast
+                token_status[token] = False
+                print(f"⚠️ Токен {token[:10]}... временно заблокирован. Ротация.")
+                return vk_api(method, params)
+            return None
+        return r.get('response')
+    except: return None
+
+# ================= ЛОГИКА СБОРА =================
 is_parsing = False
 all_leads = []
 seen_phones = set()
-seen_users = set()
+
+if os.path.exists(GLOBAL_DB):
+    with open(GLOBAL_DB, "r") as f:
+        seen_phones = set(line.strip() for line in f)
+
+def save_lead(phone, name, query, text):
+    with open(GLOBAL_DB, "a") as f: f.write(f"{phone}\n")
+    all_leads.append((phone, name, query, text))
 
 def clean_phone(phone_str):
     if not phone_str: return None
@@ -61,115 +94,79 @@ def extract_phone(text):
     match = re.search(r'(?:\+?7|8|375|998)[\s\-]?\(?\d{2,3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
     return clean_phone(match.group(0)) if match else None
 
-def vk_api(method, params, retry=0):
-    url = f"https://api.vk.com/method/{method}"
-    params.update({"access_token": VK_TOKEN, "v": V})
-    try:
-        r = requests.get(url, params=params, timeout=20).json()
-        if 'error' in r:
-            code = r['error']['error_code']
-            if code == 9: 
-                time.sleep(300) # Бан за скорость - спим 5 мин
-                return vk_api(method, params, retry + 1)
-            if code == 6: 
-                time.sleep(3)
-                return vk_api(method, params, retry + 1)
-            return None
-        return r.get('response')
-    except: return None
-
-def get_user_data(user_id):
-    res = vk_api("users.get", {"user_ids": user_id, "fields": "status,about,contacts"})
-    if res:
-        u = res[0]
-        full_info = f"{u.get('status', '')} {u.get('about', '')}"
-        phone = clean_phone(u.get('mobile_phone')) or extract_phone(full_info)
-        return phone, f"{u.get('first_name')} {u.get('last_name')}", full_info
-    return None, None, None
-
 def parser_worker(chat_id):
-    global is_parsing, all_leads, seen_phones, seen_users
+    global is_parsing
+    bot.send_message(chat_id, f"🚀 План 5000/день запущен! Работаю с {len(VK_TOKENS)} аккаунтов.")
     
-    print(f"\n🚀 СНАЙПЕРСКИЙ ПАРСИНГ НОВОСТЕЙ ЗАПУЩЕН...")
+    queries = []
+    for city in CITIES:
+        for kw in KEYWORDS:
+            queries.append(f"{kw} {city}")
+    random.shuffle(queries)
 
-    for query in NEWS_QUERIES:
+    for query in queries:
         if not is_parsing: break
-        print(f"\n🔎 ИЩУ ПОСТЫ: {query.upper()}")
+        print(f"🔎 ПРОВЕРКА: {query.upper()}")
         
+        # Парсим посты (самая живая база)
         res = vk_api("newsfeed.search", {"q": query, "count": 200})
         if not res or 'items' not in res: continue
 
-        posts = res['items']
-        for post in posts:
+        for post in res['items']:
             if not is_parsing: break
             
+            p_text = post.get('text', '')
+            if not is_strict_target(p_text): continue
+            
+            phone = extract_phone(p_text)
             author_id = post.get('owner_id')
-            if not author_id or author_id < 0 or author_id in seen_users:
-                continue
             
-            post_text = post.get('text', '')
-            
-            # СТРОЖАЙШАЯ ПРОВЕРКА ТЕКСТА ПОСТА
-            if not is_strict_target(post_text):
-                continue
-
-            seen_users.add(author_id)
-            phone = extract_phone(post_text)
-            
-            if not phone:
-                time.sleep(1.2)
-                phone, name, about = get_user_data(author_id)
-                # Проверяем профиль, если в посте было мало инфы
-                if not is_strict_target(about) and not phone:
-                    continue
-            else:
-                _, name, _ = get_user_data(author_id)
+            if not phone and author_id > 0:
+                time.sleep(0.5)
+                u_res = vk_api("users.get", {"user_ids": author_id, "fields": "contacts,status,about"})
+                if u_res:
+                    u = u_res[0]
+                    u_all = f"{u.get('status','')} {u.get('about','')}"
+                    phone = clean_phone(u.get('mobile_phone')) or extract_phone(u_all)
+                    if not is_strict_target(u_all) and not phone: continue
 
             if phone and phone not in seen_phones:
                 seen_phones.add(phone)
-                name = name or "Инъекционист"
-                all_leads.append((phone, name, post_text[:100], "Живой пост"))
-                print(f"      🎯 ЦЕЛЬ ЗАХВАЧЕНА: {phone} | {name}")
+                save_lead(phone, "Инъекционист", query, p_text[:100])
+                print(f"      ✅ НАЙДЕН: {phone}")
                 
-                if len(all_leads) % 10 == 0:
-                    bot.send_message(chat_id, f"🎯 В базе {len(all_leads)} чистых инъекционистов!")
-            
-            time.sleep(random.uniform(2, 4))
+                if len(all_leads) % 50 == 0:
+                    bot.send_message(chat_id, f"📊 Прогресс: {len(all_leads)} новых контактов!")
+
+        time.sleep(random.uniform(1, 2))
 
     is_parsing = False
-    bot.send_message(chat_id, f"✅ Сбор завершен! Итог: {len(all_leads)} идеальных лидов.")
+    bot.send_message(chat_id, f"✅ Сбор завершен! Новых лидов: {len(all_leads)}")
 
+# ================= ИНТЕРФЕЙС =================
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     if message.from_user.id == ADMIN_ID:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.row("▶️ Старт", "🛑 Стоп")
         markup.row("📊 Статистика", "💾 Выгрузить базу")
-        bot.send_message(message.chat.id, "Снайпер на позиции. Мусор не пройдет.", reply_markup=markup)
+        bot.send_message(message.chat.id, "Запуск промышленного сбора.", reply_markup=markup)
 
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     if message.from_user.id != ADMIN_ID: return
-    global is_parsing, all_leads
-    
+    global is_parsing
     if message.text == "▶️ Старт":
         is_parsing = True
         all_leads.clear()
-        seen_phones.clear()
-        seen_users.clear()
-        bot.send_message(message.chat.id, "🚀 Начинаю зачистку новостей по твоим фильтрам!")
         threading.Thread(target=parser_worker, args=(message.chat.id,)).start()
-    elif message.text == "🛑 Стоп":
-        is_parsing = False
+    elif message.text == "🛑 Стоп": is_parsing = False
     elif message.text == "📊 Статистика":
-        bot.send_message(message.chat.id, f"📊 Отфильтровано инъекционистов: {len(all_leads)}")
+        bot.send_message(message.chat.id, f"📊 Новых: {len(all_leads)}\nВсего в базе: {len(seen_phones)}")
     elif message.text == "💾 Выгрузить базу":
-        if not all_leads: return
         with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-            for p, n, d, c in all_leads:
-                f.write(f"{p} | {n} | {d}\n")
-        with open(OUTPUT_FILE, "rb") as f:
-            bot.send_document(message.chat.id, f)
+            for p, n, q, d in all_leads: f.write(f"{p} | {n} | {q} | {d}\n")
+        with open(OUTPUT_FILE, "rb") as f: bot.send_document(message.chat.id, f)
 
 if __name__ == "__main__":
     bot.polling(none_stop=True)
